@@ -1,0 +1,88 @@
+name: nodetls sync
+
+# Once a day: when bogdanfinn/tls-client has tagged a newer version than our
+# newest release, merge that tag into master, build cffi_dist against it, tag
+# v<version>-nodetls.1 and release it. Upstream tags without always publishing
+# a release, so this watches tags. A merge conflict or a failed build fails
+# the run (GitHub emails the owner) and leaves master untouched; so does an
+# upstream change to .github/workflows, which GITHUB_TOKEN may not push. Then
+# merge by hand (see .github/nodetls/README.md) and push the tag yourself.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: nodetls-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Newer upstream version?
+        id: check
+        run: |
+          git remote add upstream https://github.com/bogdanfinn/tls-client.git
+          latest=$(git ls-remote --tags --refs upstream 'v*' | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          ours=$(git tag -l 'v*-nodetls.*' | sed 's/-nodetls\..*//' | sort -V | tail -1)
+          echo "upstream $latest, ours ${ours:-none}"
+          newest=$(printf '%s\n%s\n' "$latest" "${ours:-v0.0.0}" | sort -V | tail -1)
+          if [ -n "$latest" ] && [ "$latest" != "$ours" ] && [ "$newest" = "$latest" ]; then
+            echo "upstream=$latest" >> "$GITHUB_OUTPUT"
+            echo "tag=$latest-nodetls.1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.check.outputs.tag
+        with:
+          go-version-file: cffi_dist/go.mod
+          cache-dependency-path: cffi_dist/go.sum
+
+      - name: Merge, build, tag
+        if: steps.check.outputs.tag
+        env:
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --quiet --no-tags upstream "refs/tags/${UPSTREAM}:refs/tags/${UPSTREAM}"
+          # Merge, never rebase: master keeps upstream's history plus ours.
+          git merge --no-edit "$UPSTREAM"
+
+          # Upstream bumps cffi_dist's tls-client requirement after tagging,
+          # so the tagged commit still builds the previous version.
+          cd cffi_dist
+          GOFLAGS=-mod=mod go get "github.com/bogdanfinn/tls-client@$UPSTREAM"
+          go mod tidy
+          CGO_ENABLED=1 go build -buildmode=c-shared -o "$RUNNER_TEMP/tls-client.so" .
+          go vet .
+          cd ..
+          if ! git diff --quiet; then
+            git commit -am "cffi_dist: build against tls-client $UPSTREAM"
+          fi
+
+          git tag "$TAG"
+          git push origin HEAD:master "refs/tags/$TAG"
+
+  release:
+    needs: sync
+    if: needs.sync.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/nodetls-release.yml
+    with:
+      tag: ${{ needs.sync.outputs.tag }}
