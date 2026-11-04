@@ -55,6 +55,20 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "go=$(awk '$1 == "go" { print $2 }' cffi_dist/go.mod)" >> "$GITHUB_OUTPUT"
 
+      # Before xgo: its Docker container mounts ~/go/pkg/mod, and when that is
+      # missing Docker creates ~/go as root, so setup-go could no longer make
+      # ~/go/bin. No cache for the same reason (and releases are rare).
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cffi_dist/go.mod
+          cache: false
+
+      - name: Licence notices
+        run: |
+          go install github.com/google/go-licenses/v2@v2.0.1
+          mkdir -p dist
+          .github/nodetls/notices.sh dist/THIRD_PARTY_NOTICES.txt
+
       - uses: crazy-max/ghaction-xgo@de82f877ff4552f03b66c146f608233849e9c3dc # v4.0.0
         with:
           go_version: ${{ steps.version.outputs.go }}.x
@@ -78,16 +92,6 @@ jobs:
           done
           ls -l dist
           [ -z "$missing" ]
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: cffi_dist/go.mod
-          cache-dependency-path: cffi_dist/go.sum
-
-      - name: Licence notices
-        run: |
-          go install github.com/google/go-licenses/v2@v2.0.1
-          .github/nodetls/notices.sh dist/THIRD_PARTY_NOTICES.txt
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
