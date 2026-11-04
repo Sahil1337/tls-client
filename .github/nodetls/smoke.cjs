@@ -14,6 +14,11 @@ const freeMemory = lib.func("freeMemory", "void", ["string"]);
 const requestAsync = lib.func("uint64_t requestAsync(const char *requestParams)");
 const waitNext = lib.func("const char *waitNext(int timeoutMs, _Out_ uint64_t *ticket)");
 
+// Hundreds of requests are in flight at once, but over at most MAX_CONNS
+// connections: Windows refuses connections beyond a listener's backlog (Linux
+// and macOS make the client retry), so 500 fresh ones would fail there.
+const MAX_CONNS = 64;
+
 const payload = (url) =>
   JSON.stringify({
     sessionId: "smoke",
@@ -23,6 +28,7 @@ const payload = (url) =>
     followRedirects: false,
     headers: { accept: "*/*" },
     headerOrder: ["accept"],
+    transportOptions: { maxConnsPerHost: MAX_CONNS, maxIdleConnsPerHost: MAX_CONNS },
   });
 
 /** Parses a response, frees native's copy, returns it. */
@@ -45,6 +51,8 @@ async function main() {
   const server = http.createServer((req, res) =>
     setTimeout(() => res.end(req.url), 20),
   );
+  let connections = 0;
+  server.on("connection", () => connections++);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -94,6 +102,7 @@ async function main() {
     }
   }
   assert.equal(failed.status, 0, "connection refused is an error response");
+  assert.ok(connections <= MAX_CONNS + 1, `${connections} connections for ${N} requests`);
   const queuedMs = Date.now() - started;
 
   // setNotify: native calls back from a Go thread (koffi runs the callback on
@@ -131,7 +140,7 @@ async function main() {
   setNotify(null);
   server.close();
   console.log(
-    `ok: ${N} queued requests in ${queuedMs} ms, ${N} notified in ${Date.now() - notifyStarted} ms (${calls} callbacks), ${process.platform}/${process.arch}`,
+    `ok: ${N} queued requests in ${queuedMs} ms, ${N} notified in ${Date.now() - notifyStarted} ms (${calls} callbacks), ${connections} connections, ${process.platform}/${process.arch}`,
   );
 }
 
